@@ -1,15 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/barryyan/daily-warm/engine"
+	"github.com/barryyan/daily-warm/parser"
 	"log"
 	"os"
-	"reflect"
-	"strings"
+	"text/template"
 	"time"
 
-	"github.com/barryyan/daily-warm/api"
 	"github.com/barryyan/daily-warm/gomail"
 
 	env "github.com/joho/godotenv"
@@ -28,12 +29,10 @@ func isDev() bool {
 
 func main() {
 	loadConfig()
-
 	if isDev() {
 		batchSendMail()
 		return
 	}
-
 	nyc, _ := time.LoadLocation("Asia/Shanghai")
 	cJob := cron.New(cron.WithLocation(nyc))
 
@@ -59,32 +58,36 @@ func loadConfig() {
 func batchSendMail() {
 	loadConfig()
 
-	one := api.GetONE()
-	english := api.GetEnglish()
-	poem := api.GetPoem()
-	wallpaper := api.GetWallpaper()
-	trivia := api.GetTrivia()
-
 	users := getUsers("MAIL_TO")
 	if len(users) == 0 {
 		return
 	}
 
+	// 批量获取信息
+	commonUrls := []parser.IParser{
+		parser.NewOne(),
+		parser.NewEnglish(),
+		parser.NewPoem(),
+		parser.NewWallpaper(),
+		parser.NewTrivia(),
+	}
+	data := engine.Run(commonUrls)
+
+	var userUrls []parser.IParser
+	for _, user := range users {
+		userUrls = append(userUrls, parser.NewWeather(user.Local))
+	}
+	// 批量获取用户天气
+	userWeather := engine.Run(userUrls)
+
 	res := make(chan int)
 	defer close(res)
 
 	for _, user := range users {
-		weather := api.GetWeather(user.Local)
-		datas := map[string]interface{}{
-			"one":       one,
-			"weather":   weather,
-			"english":   english,
-			"poem":      poem,
-			"wallpaper": wallpaper,
-			"trivia":    trivia,
-		}
 
-		html := generateHTML(HTML, datas)
+		data["weather"] = userWeather["weather"+user.Local]
+		html := generateHTML(data)
+
 		if isDev() {
 			fmt.Println(html)
 			return
@@ -98,6 +101,15 @@ func batchSendMail() {
 	}
 }
 
+func generateHTML(data map[string]interface{}) string {
+	var body bytes.Buffer
+	t, _ := template.ParseFiles("daily.html")
+	if err := t.Execute(&body, data); err != nil {
+		fmt.Println("There was an error:", err.Error())
+	}
+	return string(body.Bytes())
+}
+
 func getUsers(envUser string) []User {
 	var users []User
 	userJSON := os.Getenv(envUser)
@@ -106,30 +118,6 @@ func getUsers(envUser string) []User {
 		log.Fatalf("Parse users from %s error: %s", userJSON, err)
 	}
 	return users
-}
-
-func generateHTML(html string, datas map[string]interface{}) string {
-	for key, data := range datas {
-		rDataKey := reflect.TypeOf(data)
-		rDataVal := reflect.ValueOf(data)
-		fieldNum := rDataKey.NumField()
-		for i := 0; i < fieldNum; i++ {
-			fName := rDataKey.Field(i).Name
-			rValue := rDataVal.Field(i)
-
-			var fValue string
-			switch rValue.Interface().(type) {
-			case string:
-				fValue = rValue.String()
-			case []string:
-				fValue = strings.Join(rValue.Interface().([]string), "<br>")
-			}
-
-			mark := fmt.Sprintf("{{%s.%s}}", key, fName)
-			html = strings.ReplaceAll(html, mark, fValue)
-		}
-	}
-	return html
 }
 
 func sendMail(content string, to string) {
